@@ -94,6 +94,222 @@
 
 ---
 
-## 🚀 核心思路
+## 🚀 Part I 提升策略
 
-> 把数据多样化、把成功率拉到 70% 以上。
+### 基线流水线（先跑通，不动任何参数）
+
+```bash
+ROOT=$(pwd)
+
+# 1. 收集 50 条干净右臂数据
+rm -rf data/beat_block_hammer/galbot_demo_clean
+python script/collect_galbot_beat_block_hammer_dataset.py \
+    --clean-episodes 50 --skip-randomized --save-path data \
+    --overwrite --skip-render-test --force-arm-tag right
+
+# 2. 处理成 Zarr（单头部相机 + 仅右臂 8D）
+rm -rf policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr
+python policy/DP/process_data.py beat_block_hammer galbot_demo_clean 50 \
+    --load-dir data/beat_block_hammer/galbot_demo_clean \
+    --save-dir policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr \
+    --right-arm-only
+
+# 3. 训练 600 epochs
+cd $ROOT/policy/DP
+python train.py --config-name=robot_dp_8.yaml \
+    task.name=beat_block_hammer \
+    task.dataset.zarr_path=$ROOT/policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr \
+    training.num_epochs=600 training.seed=0 training.device=cuda:0 \
+    dataloader.batch_size=48 val_dataloader.batch_size=48 \
+    head_camera_type=D435 expert_data_num=50 \
+    setting=galbot_demo_clean exp_name=galbot_clean50_head_8d \
+    logging.mode=offline
+
+# 4. 评估
+cd $ROOT
+CKPT=$ROOT/policy/DP/checkpoints/beat_block_hammer-galbot_demo_clean-8d-50-galbot_demo_clean-galbot_clean50_head_8d-0/600.ckpt
+python script/eval_policy.py --config policy/DP/deploy_policy.yml --overrides \
+    --policy_name DP --task_name beat_block_hammer --task_config galbot_demo_clean \
+    --ckpt_setting galbot_demo_clean --seed 0 --instruction_type unseen \
+    --expert_data_num 50 --checkpoint_num 600 --ckpt_file $CKPT \
+    --action_dim 8 --eval_video_log True --eval_test_num 50 --eval_step_lim 200 \
+    --force_arm_tag right --force_block_arm_tag right
+```
+
+### 改进方向
+
+> 核心策略：**数据多样化 + 更多数据量 = 成功率提升**
+
+#### A. 数据增强（影响最大）
+
+采集随机化数据：
+
+```bash
+python script/collect_galbot_beat_block_hammer_dataset.py \
+    --randomized-episodes 100 \
+    --save-path data --overwrite --skip-render-test --force-arm-tag right
+```
+
+可改的 `task_config/galbot_demo_randomized.yml` 参数：
+
+| 参数 | 作用 | 建议值 |
+|---|---|---|
+| `random_background` | 随机背景纹理 | `true` |
+| `random_light` | 随机光照 | `true` |
+| `cluttered_table` | 桌面放杂物 | `true` |
+| 锤子/木块初始位姿 | 位置随机偏移 | ±10~15cm |
+| 机器人初始 qpos | 关节角随机扰动 | 小幅偏移 |
+
+#### B. 训练调优
+
+| 参数 | 基线值 | 建议尝试 |
+|---|---|---|
+| `training.num_epochs` | 600 | 800~1200 |
+| `dataloader.batch_size` | 48 | 32~64 |
+| `expert_data_num` | 50 | 150~300 |
+| `training.learning_rate` | 默认 | 1e-4 ~ 5e-4 |
+
+#### C. 数据处理
+
+将干净数据 + 随机化数据合并处理，训练时 `expert_data_num` 设为总数：
+
+```bash
+python policy/DP/process_data.py beat_block_hammer galbot_demo_randomized 100 \
+    --load-dir data/beat_block_hammer/galbot_demo_randomized \
+    --save-dir policy/DP/data/beat_block_hammer-galbot_demo_randomized-8d-100.zarr \
+    --right-arm-only
+```
+
+### 实验记录模板
+
+| 实验 | 干净数据 | 随机数据 | Epochs | Batch | 成功率 | 备注 |
+|---|---|---|---|---|---|---|
+| 基线 | 50 | 0 | 600 | 48 | ?% | — |
+| 实验1 | 50 | 100 | 800 | 48 | ?% | 加随机背景+光照 |
+| 实验2 | 50 | 200 | 1000 | 64 | ?% | + 杂物桌面 |
+
+---
+
+## 👥 团队协作（四人）
+
+### Git 分支策略
+
+```
+main (master)         ← 稳定版本，只放能跑通的代码
+  │
+  ├── data-gen        ← 数据生成改进（加随机化、改初始状态）
+  ├── train-strategy  ← 训练策略调优（超参数、联合训练）
+  ├── eval-config     ← 评估配置和脚本调整
+  └── docs            ← 文档整理（可选）
+```
+
+### 分工建议
+
+| 成员 | 负责内容 | 分支 | 涉及文件 |
+|---|---|---|---|
+| A | 数据采集随机化 | `data-gen` | `task_config/galbot_demo_randomized.yml`、`script/collect_*.py` |
+| B | 训练策略调优 | `train-strategy` | `policy/DP/train.py`、训练超参数 |
+| C | 数据处理 & 评估 | `eval-config` | `policy/DP/process_data.py`、`script/eval_policy.py` |
+| D | 环境搭建 & 集成 | `main` 维护 | 协助队友、合并代码、跑最终评估 |
+
+### 操作原则
+
+- **别直接在 main 上改代码**，所有改动走分支 + Pull Request
+- **每天收工前 push**，防止虚拟机宕机丢代码
+- **数据文件不提交**（`.gitignore` 已忽略 HDF5/Zarr），只提交代码和配置
+- **checkpoint 不提交**（`**/checkpoints/` 已忽略），体积太大
+- 遇到 merge 冲突：保留双方的改动，一起看
+
+---
+
+## 🔄 本地 + 虚拟机协作工作流
+
+```
+┌─────────────────┐     push     ┌──────────┐     pull     ┌──────────────┐
+│  本地 (Windows)  │ ──────────→ │  GitHub  │ ──────────→ │ 虚拟机 (Linux) │
+│  写代码/改配置    │             │          │             │  跑采集/训练    │
+└─────────────────┘             └──────────┘             └──────────────┘
+```
+
+### 本地（Windows）— 写代码
+
+```bash
+# 1. 拉取最新代码（避免冲突）
+git pull
+
+# 2. 切换到自己的分支
+git checkout data-gen    # 或用你的分支名
+
+# 3. 改代码...改配置...保存
+
+# 4. 提交并推送
+git add .
+git commit -m "feat: 增加锤子位姿和桌面纹理随机化"
+git push origin data-gen
+
+# 5. 去 GitHub 网页发 Pull Request，合并到 main
+```
+
+### 虚拟机（Linux）— 跑训练
+
+**首次 setup：**
+```bash
+# 克隆仓库
+git clone https://github.com/Ruanzz2333/Assignment4-009.git
+cd Assignment4-009
+
+# 配环境（只需一次）
+conda create -n RoboTwin python=3.10 -y
+conda activate RoboTwin
+bash script/_install.sh
+bash script/_download_assets.sh
+
+# 下载 Galbot 资产，解压到 assets/embodiments/
+```
+
+**每次本地 push 后，虚拟机上：**
+```bash
+cd ~/Assignment4-009
+conda activate RoboTwin
+
+# 1. 暂存虚拟机上的临时文件（如果有）
+git stash
+
+# 2. 拉取最新
+git pull
+
+# 3. 恢复自己的临时文件
+git stash pop
+
+# 4. 跑训练/评估
+ROOT=$(pwd)
+python script/collect_galbot_beat_block_hammer_dataset.py \
+    --clean-episodes 50 --skip-randomized --save-path data \
+    --overwrite --skip-render-test --force-arm-tag right
+
+# 后续：处理数据 → 训练 → 评估
+```
+
+### 文件传输
+
+| 场景 | 命令 |
+|---|---|
+| 下载 checkpoint 到本地 | `scp user@vm_ip:~/Assignment4-009/policy/DP/checkpoints/xxx.ckpt .` |
+| 上传文件到虚拟机 | `scp local_file user@vm_ip:~/Assignment4-009/` |
+| 批量下载评估视频 | `scp -r user@vm_ip:~/Assignment4-009/eval_video/ .` |
+
+### 一句话总结
+
+> **本地改 → push → 发 PR → merge → 虚拟机 pull → 跑实验 → scp 拿结果**
+
+---
+
+## 📋 快速启动清单
+
+- [ ] 克隆仓库到本地和虚拟机
+- [ ] 配好 RoboTwin conda 环境
+- [ ] 下载 Galbot 资产放到 `assets/embodiments/`
+- [ ] 跑通基线 50 条干净数据 → 训练 → 评估流水线
+- [ ] 修改数据生成加随机化，提升数据多样性
+- [ ] 调优训练策略，目标成功率 ≥ 70%
+- [ ] 提交最终 checkpoint 到 course.pku.edu.cn
