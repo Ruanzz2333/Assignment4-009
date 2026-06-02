@@ -190,66 +190,6 @@ python policy/DP/process_data.py beat_block_hammer galbot_demo_randomized 100 \
 
 ---
 
-## 👥 团队协作（四人）
-
-### Git 分支策略
-
-```
-main (master)         ← 稳定版本，只放能跑通的代码
-  │
-  ├── data-gen        ← 数据生成改进（加随机化、改初始状态）
-  ├── train-strategy  ← 训练策略调优（超参数、联合训练）
-  ├── eval-config     ← 评估配置和脚本调整
-  └── docs            ← 文档整理（可选）
-```
-
-### 分工建议
-
-| 成员 | 负责内容 | 分支 | 涉及文件 |
-|---|---|---|---|
-| A | 数据采集随机化 | `data-gen` | `task_config/galbot_demo_randomized.yml`、`script/collect_*.py` |
-| B | 训练策略调优 | `train-strategy` | `policy/DP/train.py`、训练超参数 |
-| C | 数据处理 & 评估 | `eval-config` | `policy/DP/process_data.py`、`script/eval_policy.py` |
-| D | 环境搭建 & 集成 | `main` 维护 | 协助队友、合并代码、跑最终评估 |
-
-### 操作原则
-
-- **别直接在 main 上改代码**，所有改动走分支 + Pull Request
-- **每天收工前 push**，防止虚拟机宕机丢代码
-- **数据文件不提交**（`.gitignore` 已忽略 HDF5/Zarr），只提交代码和配置
-- **checkpoint 不提交**（`**/checkpoints/` 已忽略），体积太大
-- 遇到 merge 冲突：保留双方的改动，一起看
-
----
-
-## 🔄 本地 + 虚拟机协作工作流
-
-```
-┌─────────────────┐     push     ┌──────────┐     pull     ┌──────────────┐
-│  本地 (Windows)  │ ──────────→ │  GitHub  │ ──────────→ │ 虚拟机 (Linux) │
-│  写代码/改配置    │             │          │             │  跑采集/训练    │
-└─────────────────┘             └──────────┘             └──────────────┘
-```
-
-### 本地（Windows）— 写代码
-
-```bash
-# 1. 拉取最新代码（避免冲突）
-git pull
-
-# 2. 切换到自己的分支
-git checkout data-gen    # 或用你的分支名
-
-# 3. 改代码...改配置...保存
-
-# 4. 提交并推送
-git add .
-git commit -m "feat: 增加锤子位姿和桌面纹理随机化"
-git push origin data-gen
-
-# 5. 去 GitHub 网页发 Pull Request，合并到 main
-```
-
 ### 虚拟机（Linux）— 跑训练
 
 **首次 setup：**
@@ -300,16 +240,16 @@ python script/collect_galbot_beat_block_hammer_dataset.py \
 
 ### 一句话总结
 
-> **本地改 → push → 发 PR → merge → 虚拟机 pull → 跑实验 → scp 拿结果**
+> **本地改 → push → 虚拟机 pull → 跑实验 → scp 拿结果**
 
 ---
 
 ## 📋 快速启动清单
 
-- [ ] 克隆仓库到本地和虚拟机
-- [ ] 配好 RoboTwin conda 环境
-- [ ] 下载 Galbot 资产放到 `assets/embodiments/`
-- [ ] 跑通基线 50 条干净数据 → 训练 → 评估流水线
+- [✅️] 克隆仓库到本地和虚拟机
+- [✅️] 配好 RoboTwin conda 环境
+- [✅️] 下载 Galbot 资产放到 `assets/embodiments/`
+- [⚡] 跑通基线 50 条干净数据 → 训练 → 评估流水线
 - [ ] 修改数据生成加随机化，提升数据多样性
 - [ ] 调优训练策略，目标成功率 ≥ 70%
 - [ ] 提交最终 checkpoint 到 course.pku.edu.cn
