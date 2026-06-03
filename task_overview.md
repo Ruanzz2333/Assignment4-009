@@ -190,6 +190,60 @@ python policy/DP/process_data.py beat_block_hammer galbot_demo_randomized 100 \
 
 ---
 
+## 📖 命令参数速查
+
+### 训练命令参数
+
+| 参数 | 基线值 | 含义 |
+|---|---|---|
+| `--config-name` | `robot_dp_8.yaml` | Hydra 主配置，定义 DP 模型结构 |
+| `task.name` | `beat_block_hammer` | 任务名称 |
+| `task.dataset.zarr_path` | `.zarr 路径` | 训练数据集位置 |
+| `training.num_epochs` | `600` | 训练轮次 |
+| `training.seed` | `0` | 随机种子 |
+| `training.device` | `cuda:0` | 训练设备 |
+| `dataloader.batch_size` | `48` | 训练批次大小 |
+| `val_dataloader.batch_size` | `48` | 验证批次大小 |
+| `head_camera_type` | `D435` | 头部相机型号 |
+| `expert_data_num` | `50` | 数据总量（用于统计归一化） |
+| `setting` | `galbot_demo_clean` | 训练 setting 标识 |
+| `exp_name` | `galbot_clean50_head_8d` | 实验名（决定 checkpoint 目录） |
+| `logging.mode` | `offline` | 离线模式（不上传 wandb） |
+
+### 评估命令参数
+
+| 参数 | 基线值 | 含义 |
+|---|---|---|
+| `--config` | `policy/DP/deploy_policy.yml` | 部署推理配置 |
+| `--overrides` | — | 允许命令行覆盖 YAML 配置 |
+| `--policy_name` | `DP` | 使用 Diffusion Policy |
+| `--task_name` | `beat_block_hammer` | 任务名称 |
+| `--task_config` | `galbot_demo_clean` | 场景配置（干净/随机化） |
+| `--ckpt_setting` | `galbot_demo_clean` | 匹配训练时的 `setting` |
+| `--seed` | `0` | 起始种子（评估时偏移为 100000+） |
+| `--instruction_type` | `unseen` | 使用未见过的语言指令 |
+| `--expert_data_num` | `50` | 匹配训练数据量（归一化统计） |
+| `--checkpoint_num` | `600` | 加载第几个 epoch 的权重 |
+| `--ckpt_file` | `路径/600.ckpt` | checkpoint 完整路径 |
+| `--action_dim` | `8` | 动作维度（右臂 7D + 夹爪 1D） |
+| `--eval_video_log` | `True` | 保存评估视频 |
+| `--eval_test_num` | `50` | 测试 episode 数量 |
+| `--eval_step_lim` | `200` | 单 episode 最大步数 |
+| `--force_arm_tag` | `right` | 强制右臂执行 |
+| `--force_block_arm_tag` | `right` | 阻挡左臂 |
+
+### ⚠️ 必须保持一致的关键参数
+
+| 参数 | 原因 |
+|---|---|
+| `task_name` | 训练和评估必须是同一个任务 |
+| `action_dim` | 必须匹配训练时的维度（8D） |
+| `expert_data_num` | 必须等于训练数据量，否则归一化参数不匹配 |
+| `ckpt_setting` / `setting` | 评估 `ckpt_setting` = 训练 `setting` |
+| `head_camera_type` | 相机型号必须一致 |
+
+---
+
 ### 虚拟机（Linux）— 跑训练
 
 **首次 setup：**
