@@ -210,6 +210,10 @@ python policy/DP/process_data.py beat_block_hammer galbot_demo_randomized 100 \
 | `exp_name` | `galbot_clean50_head_8d` | 实验名（决定 checkpoint 目录） |
 | `logging.mode` | `offline` | 离线模式（不上传 wandb） |
 
+### checkpoint路径命名构成
+e.g. beat_block_hammer-galbot_demo_clean-8d-50-galbot_demo_clean-galbot_clean50_head_8d_h8o3a6-0
+任务名称-数据集名称-setting标识-实验名-随机种子
+
 ### 评估命令参数
 
 | 参数 | 基线值 | 含义 |

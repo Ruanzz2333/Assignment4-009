@@ -9,9 +9,9 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "default"
 
-horizon: 8
-n_obs_steps: 3
-n_action_steps: 6
+horizon: 12
+n_obs_steps: 4
+n_action_steps: 8
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
 past_action_visible: False
@@ -95,12 +95,12 @@ training:
   resume_ckpt_path: null
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 600
+  num_epochs: 800
   gradient_accumulate_every: 1
   use_ema: True
   freeze_encoder: False
   rollout_every: 50
-  checkpoint_every: 300
+  checkpoint_every: 200
   val_every: 1
   sample_every: 5
   max_train_steps: null
