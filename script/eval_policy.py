@@ -1,9 +1,6 @@
 import sys
 import os
 import subprocess
-import multiprocessing as mp
-import queue
-import time
 
 sys.path.append("./")
 sys.path.append(f"./policy")
@@ -27,7 +24,6 @@ from generate_episode_instructions import *
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
-DEMO_PREFLIGHT_TIMEOUT = 120
 
 
 def class_decorator(task_name):
@@ -46,78 +42,6 @@ def eval_function_decorator(policy_name, model_name):
         return getattr(policy_model, model_name)
     except ImportError as e:
         raise e
-
-
-def demo_preflight_worker(task_name: str, args: dict, now_id: int, now_seed: int, result_queue) -> None:
-    task_env = None
-    try:
-        task_env = class_decorator(task_name)
-        task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        episode_info = task_env.play_once()
-        result_queue.put(
-            (
-                "ok",
-                {
-                    "episode_info": {"info": episode_info["info"]},
-                    "success": bool(task_env.plan_success and task_env.check_success()),
-                },
-            )
-        )
-    except UnStableError as e:
-        result_queue.put(("unstable", str(e)))
-    except Exception:
-        result_queue.put(("error", traceback.format_exc()))
-    finally:
-        if task_env is not None:
-            try:
-                task_env.close_env()
-            except Exception:
-                pass
-
-
-def run_demo_preflight_with_timeout(
-    task_name: str,
-    args: dict,
-    now_id: int,
-    now_seed: int,
-    timeout: int = DEMO_PREFLIGHT_TIMEOUT,
-) -> tuple[str, dict | str | None]:
-    ctx = mp.get_context("spawn")
-    result_queue = ctx.Queue()
-    process = ctx.Process(
-        target=demo_preflight_worker,
-        args=(task_name, args, now_id, now_seed, result_queue),
-    )
-    process.start()
-    deadline = time.time() + timeout
-    result = None
-    while result is None:
-        try:
-            result = result_queue.get_nowait()
-        except queue.Empty:
-            if not process.is_alive():
-                process.join()
-                try:
-                    result = result_queue.get(timeout=1)
-                except queue.Empty:
-                    result = ("error", f"preflight process exited with code {process.exitcode}")
-                break
-            if time.time() >= deadline:
-                result = ("timeout", None)
-                break
-            time.sleep(0.2)
-
-    if process.is_alive():
-        if result[0] == "timeout":
-            process.terminate()
-        process.join(5)
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        if process.is_alive():
-            process.kill()
-            process.join()
-    return result
 
 def get_camera_config(camera_type):
     camera_config_path = os.path.join(parent_directory, "../task_config/_camera_config.yml")
@@ -330,28 +254,30 @@ def eval_policy(task_name,
         render_freq = args["render_freq"]
         args["render_freq"] = 0
 
-        preflight_status, preflight_payload = run_demo_preflight_with_timeout(task_name, args, now_id, now_seed)
-        if preflight_status == "timeout":
-            print(f"demo preflight timeout after {DEMO_PREFLIGHT_TIMEOUT}s, skip seed {now_seed}")
+        try:
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+            episode_info = TASK_ENV.play_once()
+            TASK_ENV.close_env()
+        except UnStableError as e:
+            # print(" -------------")
+            # print("Error: ", e)
+            # print(" -------------")
+            TASK_ENV.close_env()
             now_seed += 1
             args["render_freq"] = render_freq
             continue
-        if preflight_status == "unstable":
-            now_seed += 1
-            args["render_freq"] = render_freq
-            continue
-        if preflight_status == "error":
-            print(" -------------")
-            print("Error: ", preflight_payload)
-            print(" -------------")
+        except Exception as e:
+            # stack_trace = traceback.format_exc()
+            # print(" -------------")
+            # print("Error: ", e)
+            # print(" -------------")
+            TASK_ENV.close_env()
             now_seed += 1
             args["render_freq"] = render_freq
             print("error occurs !")
             continue
 
-        episode_info = preflight_payload["episode_info"]
-
-        if preflight_payload["success"]:
+        if TASK_ENV.plan_success and TASK_ENV.check_success():
             succ_seed += 1
             suc_test_seed_list.append(now_seed)
         else:
