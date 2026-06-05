@@ -27,7 +27,7 @@ from generate_episode_instructions import *
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
-DEMO_PREFLIGHT_TIMEOUT = 300
+DEMO_PREFLIGHT_TIMEOUT = 120
 
 
 def class_decorator(task_name):
@@ -48,23 +48,25 @@ def eval_function_decorator(policy_name, model_name):
         raise e
 
 
-def run_demo_preflight_once(task_name: str, args: dict, now_id: int, now_seed: int) -> tuple[str, dict | str]:
+def demo_preflight_worker(task_name: str, args: dict, now_id: int, now_seed: int, result_queue) -> None:
     task_env = None
     try:
         task_env = class_decorator(task_name)
         task_env.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
         episode_info = task_env.play_once()
-        return (
-            "ok",
-            {
-                "episode_info": {"info": episode_info["info"]},
-                "success": bool(task_env.plan_success and task_env.check_success()),
-            },
+        result_queue.put(
+            (
+                "ok",
+                {
+                    "episode_info": {"info": episode_info["info"]},
+                    "success": bool(task_env.plan_success and task_env.check_success()),
+                },
+            )
         )
     except UnStableError as e:
-        return "unstable", str(e)
+        result_queue.put(("unstable", str(e)))
     except Exception:
-        return "error", traceback.format_exc()
+        result_queue.put(("error", traceback.format_exc()))
     finally:
         if task_env is not None:
             try:
@@ -73,81 +75,49 @@ def run_demo_preflight_once(task_name: str, args: dict, now_id: int, now_seed: i
                 pass
 
 
-def demo_preflight_worker(task_name: str, request_queue, result_queue) -> None:
-    while True:
-        request = request_queue.get()
-        if request is None:
-            break
-        request_id, args, now_id, now_seed = request
-        status, payload = run_demo_preflight_once(task_name, args, now_id, now_seed)
-        result_queue.put((request_id, status, payload))
+def run_demo_preflight_with_timeout(
+    task_name: str,
+    args: dict,
+    now_id: int,
+    now_seed: int,
+    timeout: int = DEMO_PREFLIGHT_TIMEOUT,
+) -> tuple[str, dict | str | None]:
+    ctx = mp.get_context("spawn")
+    result_queue = ctx.Queue()
+    process = ctx.Process(
+        target=demo_preflight_worker,
+        args=(task_name, args, now_id, now_seed, result_queue),
+    )
+    process.start()
+    deadline = time.time() + timeout
+    result = None
+    while result is None:
+        try:
+            result = result_queue.get_nowait()
+        except queue.Empty:
+            if not process.is_alive():
+                process.join()
+                try:
+                    result = result_queue.get(timeout=1)
+                except queue.Empty:
+                    result = ("error", f"preflight process exited with code {process.exitcode}")
+                break
+            if time.time() >= deadline:
+                result = ("timeout", None)
+                break
+            time.sleep(0.2)
 
-
-class DemoPreflightRunner:
-
-    def __init__(self, task_name: str, timeout: int = DEMO_PREFLIGHT_TIMEOUT) -> None:
-        self.task_name = task_name
-        self.timeout = timeout
-        self.ctx = mp.get_context("spawn")
-        self.request_id = 0
-        self.process = None
-        self.request_queue = None
-        self.result_queue = None
-        self.start()
-
-    def start(self) -> None:
-        self.request_queue = self.ctx.Queue()
-        self.result_queue = self.ctx.Queue()
-        self.process = self.ctx.Process(
-            target=demo_preflight_worker,
-            args=(self.task_name, self.request_queue, self.result_queue),
-        )
-        self.process.daemon = True
-        self.process.start()
-
-    def close(self, force: bool = False) -> None:
-        if self.process is None:
-            return
-        if self.process.is_alive() and not force:
-            try:
-                self.request_queue.put(None)
-            except Exception:
-                pass
-            self.process.join(5)
-        if self.process.is_alive():
-            self.process.terminate()
-            self.process.join(5)
-        if self.process.is_alive():
-            self.process.kill()
-            self.process.join()
-
-    def restart(self, force: bool = False) -> None:
-        self.close(force=force)
-        self.start()
-
-    def run(self, args: dict, now_id: int, now_seed: int) -> tuple[str, dict | str | None]:
-        if self.process is None or not self.process.is_alive():
-            self.restart()
-
-        self.request_id += 1
-        request_id = self.request_id
-        self.request_queue.put((request_id, args, now_id, now_seed))
-
-        deadline = time.time() + self.timeout
-        while True:
-            try:
-                result_id, status, payload = self.result_queue.get_nowait()
-                if result_id == request_id:
-                    return status, payload
-            except queue.Empty:
-                if not self.process.is_alive():
-                    exitcode = self.process.exitcode
-                    self.restart()
-                    return "error", f"preflight worker exited with code {exitcode}"
-                if time.time() >= deadline:
-                    self.restart(force=True)
-                    return "timeout", None
-                time.sleep(0.2)
+    if process.is_alive():
+        if result[0] == "timeout":
+            process.terminate()
+        process.join(5)
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    return result
 
 def get_camera_config(camera_type):
     camera_config_path = os.path.join(parent_directory, "../task_config/_camera_config.yml")
@@ -356,113 +326,109 @@ def eval_policy(task_name,
 
     args["eval_mode"] = True
 
-    preflight_runner = DemoPreflightRunner(task_name)
-    try:
-        while succ_seed < test_num:
-            render_freq = args["render_freq"]
-            args["render_freq"] = 0
+    while succ_seed < test_num:
+        render_freq = args["render_freq"]
+        args["render_freq"] = 0
 
-            preflight_status, preflight_payload = preflight_runner.run(args, now_id, now_seed)
-            if preflight_status == "timeout":
-                print(f"demo preflight timeout after {DEMO_PREFLIGHT_TIMEOUT}s, skip seed {now_seed}")
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
-            if preflight_status == "unstable":
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
-            if preflight_status == "error":
-                print(" -------------")
-                print("Error: ", preflight_payload)
-                print(" -------------")
-                now_seed += 1
-                args["render_freq"] = render_freq
-                print("error occurs !")
-                continue
-
-            episode_info = preflight_payload["episode_info"]
-
-            if preflight_payload["success"]:
-                succ_seed += 1
-                suc_test_seed_list.append(now_seed)
-            else:
-                now_seed += 1
-                args["render_freq"] = render_freq
-                continue
-
-            args["render_freq"] = render_freq
-
-            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-            episode_info_list = [episode_info["info"]]
-            results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
-            instruction_choices = results[0].get(instruction_type, []) if results else []
-            instruction = np.random.choice(instruction_choices) if instruction_choices else ""
-            TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
-
-            if TASK_ENV.eval_video_path is not None:
-                ffmpeg = subprocess.Popen(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-loglevel",
-                        "error",
-                        "-f",
-                        "rawvideo",
-                        "-pixel_format",
-                        "rgb24",
-                        "-video_size",
-                        video_size,
-                        "-framerate",
-                        "10",
-                        "-i",
-                        "-",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-vcodec",
-                        "libx264",
-                        "-crf",
-                        "23",
-                        f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
-                    ],
-                    stdin=subprocess.PIPE,
-                )
-                TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
-
-            succ = False
-            reset_func(model)
-            while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
-                observation = TASK_ENV.get_obs()
-                eval_func(TASK_ENV, model, observation)
-                if TASK_ENV.eval_success:
-                    succ = True
-                    break
-            # task_total_reward += TASK_ENV.episode_score
-            if TASK_ENV.eval_video_path is not None:
-                TASK_ENV._del_eval_video_ffmpeg()
-
-            if succ:
-                TASK_ENV.suc += 1
-                print("\033[92mSuccess!\033[0m")
-            else:
-                print("\033[91mFail!\033[0m")
-
-            now_id += 1
-            TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
-
-            if TASK_ENV.render_freq:
-                TASK_ENV.viewer.close()
-
-            TASK_ENV.test_num += 1
-
-            print(
-                f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
-                f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
-            )
-            # TASK_ENV._take_picture()
+        preflight_status, preflight_payload = run_demo_preflight_with_timeout(task_name, args, now_id, now_seed)
+        if preflight_status == "timeout":
+            print(f"demo preflight timeout after {DEMO_PREFLIGHT_TIMEOUT}s, skip seed {now_seed}")
             now_seed += 1
-    finally:
-        preflight_runner.close()
+            args["render_freq"] = render_freq
+            continue
+        if preflight_status == "unstable":
+            now_seed += 1
+            args["render_freq"] = render_freq
+            continue
+        if preflight_status == "error":
+            print(" -------------")
+            print("Error: ", preflight_payload)
+            print(" -------------")
+            now_seed += 1
+            args["render_freq"] = render_freq
+            print("error occurs !")
+            continue
+
+        episode_info = preflight_payload["episode_info"]
+
+        if preflight_payload["success"]:
+            succ_seed += 1
+            suc_test_seed_list.append(now_seed)
+        else:
+            now_seed += 1
+            args["render_freq"] = render_freq
+            continue
+
+        args["render_freq"] = render_freq
+
+        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+        episode_info_list = [episode_info["info"]]
+        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
+        instruction_choices = results[0].get(instruction_type, []) if results else []
+        instruction = np.random.choice(instruction_choices) if instruction_choices else ""
+        TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
+
+        if TASK_ENV.eval_video_path is not None:
+            ffmpeg = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    video_size,
+                    "-framerate",
+                    "10",
+                    "-i",
+                    "-",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-vcodec",
+                    "libx264",
+                    "-crf",
+                    "23",
+                    f"{TASK_ENV.eval_video_path}/episode{TASK_ENV.test_num}.mp4",
+                ],
+                stdin=subprocess.PIPE,
+            )
+            TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
+
+        succ = False
+        reset_func(model)
+        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+            observation = TASK_ENV.get_obs()
+            eval_func(TASK_ENV, model, observation)
+            if TASK_ENV.eval_success:
+                succ = True
+                break
+        # task_total_reward += TASK_ENV.episode_score
+        if TASK_ENV.eval_video_path is not None:
+            TASK_ENV._del_eval_video_ffmpeg()
+
+        if succ:
+            TASK_ENV.suc += 1
+            print("\033[92mSuccess!\033[0m")
+        else:
+            print("\033[91mFail!\033[0m")
+
+        now_id += 1
+        TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
+
+        if TASK_ENV.render_freq:
+            TASK_ENV.viewer.close()
+
+        TASK_ENV.test_num += 1
+
+        print(
+            f"\033[93m{task_name}\033[0m | \033[94m{args['policy_name']}\033[0m | \033[92m{args['task_config']}\033[0m | \033[91m{args['ckpt_setting']}\033[0m\n"
+            f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
+        )
+        # TASK_ENV._take_picture()
+        now_seed += 1
 
     return now_seed, TASK_ENV.suc
 
