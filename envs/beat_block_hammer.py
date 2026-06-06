@@ -135,8 +135,8 @@ class beat_block_hammer(Base_Task):
         table_center_x, table_center_y = self.table_xy_bias
         table_near_y = table_center_y - self.table_width / 2
         hammer_xy = [table_center_x, table_center_y]
-        block_x_offset = [0.05, 0.25]
-        block_y_from_near_edge = [0.15, 0.45]
+        block_x_offset = [0.03, 0.35]
+        block_y_from_near_edge = [0.10, 0.50]
 
         self.hammer = create_actor(
             scene=self,

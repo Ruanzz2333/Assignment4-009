@@ -11,9 +11,9 @@ save_freq: 15                 # 每隔多少帧保存一次数据
 embodiment: [galbot-one-golf] # 机器人型号
 arm_control_substeps: 2       # 每步控制子步数（越大控制越精细）
 table_height_bias: -0.29      # 桌面高度偏移（m）
-table_xy_bias: [0.05, 0.124174] # 桌面水平偏移 [x, y]（m），x轴加了0.05变化
-table_length: 1.10            # 桌面长度（m），从0.90增大
-table_width: 0.70             # 桌面宽度（m），从0.55增大
+table_xy_bias: [0.0, 0.124174] # 桌面水平偏移 [x, y]（m），保持原值
+table_length: 0.95            # 桌面长度（m），从0.90小幅增大
+table_width: 0.60             # 桌面宽度（m），从0.55小幅增大
 
 embodiment_config_overrides:
   drive_passive_gripper_mimic_targets: true      # 驱动被动夹爪跟随主动夹爪
