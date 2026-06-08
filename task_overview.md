@@ -94,99 +94,73 @@
 
 ---
 
-## 🚀 Part I 提升策略
+## 🚀 Part I 改进历程
 
-### 基线流水线（先跑通，不动任何参数）
+### 实验 1：基线（h8o3a6，50 条干净数据）
 
-```bash
-ROOT=$(pwd)
+直接使用 README 提供的默认配置跑通流水线，模型完成训练后在干净场景评估。
 
-# 1. 收集 50 条干净右臂数据
-rm -rf data/beat_block_hammer/galbot_demo_clean
-python script/collect_galbot_beat_block_hammer_dataset.py \
-    --clean-episodes 50 --skip-randomized --save-path data \
-    --overwrite --skip-render-test --force-arm-tag right
+- **现象**：大部分 episode 能抓起锤子，但第一下锤到木块附近后出现水平方向抽搐，最终步数耗尽失败。
+- **分析**：扩散策略为纯模仿学习，训练数据全是完美轨迹，模型从未见过"偏移了几厘米"的状态。一旦首次落点有偏差就进入分布外，无法自我纠偏。
+- **成功率**：~80%（干净场景）
 
-# 2. 处理成 Zarr（单头部相机 + 仅右臂 8D）
-rm -rf policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr
-python policy/DP/process_data.py beat_block_hammer galbot_demo_clean 50 \
-    --load-dir data/beat_block_hammer/galbot_demo_clean \
-    --save-dir policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr \
-    --right-arm-only
+### 实验 2：尝试随机场景数据（100 条随机数据）
 
-# 3. 训练 600 epochs
-cd $ROOT/policy/DP
-python train.py --config-name=robot_dp_8.yaml \
-    task.name=beat_block_hammer \
-    task.dataset.zarr_path=$ROOT/policy/DP/data/beat_block_hammer-galbot_demo_clean-8d-50.zarr \
-    training.num_epochs=600 training.seed=0 training.device=cuda:0 \
-    dataloader.batch_size=48 val_dataloader.batch_size=48 \
-    head_camera_type=D435 expert_data_num=50 \
-    setting=galbot_demo_clean exp_name=galbot_clean50_head_8d \
-    logging.mode=offline
+采集 100 条随机场景数据（含随机背景、杂物桌面、随机光照），单独训练。
 
-# 4. 评估
-cd $ROOT
-CKPT=$ROOT/policy/DP/checkpoints/beat_block_hammer-galbot_demo_clean-8d-50-galbot_demo_clean-galbot_clean50_head_8d-0/600.ckpt
-python script/eval_policy.py --config policy/DP/deploy_policy.yml --overrides \
-    --policy_name DP --task_name beat_block_hammer --task_config galbot_demo_clean \
-    --ckpt_setting galbot_demo_clean --seed 0 --instruction_type unseen \
-    --expert_data_num 50 --checkpoint_num 600 --ckpt_file $CKPT \
-    --action_dim 8 --eval_video_log True --eval_test_num 50 --eval_step_lim 200 \
-    --force_arm_tag right --force_block_arm_tag right
-```
+- **现象**：随机环境下能抓起锤子但定位不准；在干净场景评估反而表现下降。
+- **分析**：随机数据中的杂物和光照变化增加了噪声，ResNet18 特征提取被干扰，定位精度反而不如纯干净数据训出的模型。
+- **结论**：Part I 只需要干净场景 ≥70%，随机数据留到 Part II/III 使用。
 
-### 改进方向
+### 实验 3：扩大木块位置范围（100 条干净数据，h16o4a8）
 
-> 核心策略：**数据多样化 + 更多数据量 = 成功率提升**
+核心思路：让专家轨迹覆盖更多起始位置，模型学会"从不同距离接近木块"。
 
-#### A. 数据增强（影响最大）
+**改了什么：**
 
-采集随机化数据：
+1. `envs/beat_block_hammer.py`：扩大木块初始位置范围
+   ```python
+   block_x_offset = [0.03, 0.35]        # 原 [0.05, 0.25]，范围翻倍
+   block_y_from_near_edge = [0.10, 0.50] # 原 [0.15, 0.45]
+   ```
+2. `task_config/galbot_demo_clean.yml`：桌子小幅扩大
+   ```yaml
+   table_length: 0.95   # 原 0.90
+   table_width: 0.60    # 原 0.55
+   ```
+3. 训练超参数：
+   ```
+   horizon=16, n_obs_steps=4, n_action_steps=8
+   100 条干净数据, 800 epochs
+   ```
+   更长的 horizon（16 vs 原始 8）让模型更早规划敲击路径；更多观测步数（4 vs 3）增强运动趋势感知。
 
-```bash
-python script/collect_galbot_beat_block_hammer_dataset.py \
-    --randomized-episodes 100 \
-    --save-path data --overwrite --skip-render-test --force-arm-tag right
-```
+**评估时恢复到初始配置，额外加 `--n_action_steps 6`** 提升纠偏频率。
 
-可改的 `task_config/galbot_demo_randomized.yml` 参数：
+- **最终成功率**：**92%（干净场景）**
+- **关键收获**：对模仿学习来说，数据覆盖的**起始条件多样性**比数据条数更重要。扩大 block offset 范围让专家轨迹覆盖了不同距离的接近路径，模型学会了适应偏差而非死记固定模式。
 
-| 参数 | 作用 | 建议值 |
+### 失败路径总结
+
+| 尝试 | 结果 | 原因 |
 |---|---|---|
-| `random_background` | 随机背景纹理 | `true` |
-| `random_light` | 随机光照 | `true` |
-| `cluttered_table` | 桌面放杂物 | `true` |
-| 锤子/木块初始位姿 | 位置随机偏移 | ±10~15cm |
-| 机器人初始 qpos | 关节角随机扰动 | 小幅偏移 |
+| 纯随机数据训练 → 干净评估 | 定位精度下降 | 噪声干扰特征提取 |
+| 混合训练（干净50+随机100） | 干净评估尚可，随机评估抽搐 | 随机场景分布太广，模型无法兼顾 |
+| 桌子改得太大（1.10×0.70） | 全部采集失败 | 超出机器人臂展范围 |
+| 改 n_action_steps=2 | 建议放弃 | 训练碎片化严重 |
 
-#### B. 训练调优
+### 最终配置速查
 
-| 参数 | 基线值 | 建议尝试 |
-|---|---|---|
-| `training.num_epochs` | 600 | 800~1200 |
-| `dataloader.batch_size` | 48 | 32~64 |
-| `expert_data_num` | 50 | 150~300 |
-| `training.learning_rate` | 默认 | 1e-4 ~ 5e-4 |
-
-#### C. 数据处理
-
-将干净数据 + 随机化数据合并处理，训练时 `expert_data_num` 设为总数：
-
-```bash
-python policy/DP/process_data.py beat_block_hammer galbot_demo_randomized 100 \
-    --load-dir data/beat_block_hammer/galbot_demo_randomized \
-    --save-dir policy/DP/data/beat_block_hammer-galbot_demo_randomized-8d-100.zarr \
-    --right-arm-only
-```
-
-### 实验记录模板
-
-| 实验 | 干净数据 | 随机数据 | Epochs | Batch | 成功率 | 备注 |
-|---|---|---|---|---|---|---|
-| 基线 | 50 | 0 | 600 | 48 | ?% | — |
-| 实验1 | 50 | 100 | 800 | 48 | ?% | 加随机背景+光照 |
-| 实验2 | 50 | 200 | 1000 | 64 | ?% | + 杂物桌面 |
+| 项目 | 值 |
+|---|---|
+| 训练数据 | 100 条干净（galbot_demo_clean） |
+| 训练参数 | h16o4a8, batch=48, epochs=800 |
+| 评估参数 | `--n_obs_steps 4 --n_action_steps 6` |
+| block_x_offset | `[0.03, 0.35]` |
+| block_y_from_near_edge | `[0.10, 0.50]` |
+| table_length | 0.95 |
+| table_width | 0.60 |
+| ✅ Part I 成功率 | **92%** |
 
 ---
 
@@ -307,7 +281,7 @@ python script/collect_galbot_beat_block_hammer_dataset.py \
 - [✅️] 克隆仓库到本地和虚拟机
 - [✅️] 配好 RoboTwin conda 环境
 - [✅️] 下载 Galbot 资产放到 `assets/embodiments/`
-- [⚡] 跑通基线 50 条干净数据 → 训练 → 评估流水线
-- [ ] 修改数据生成加随机化，提升数据多样性
-- [ ] 调优训练策略，目标成功率 ≥ 70%
-- [ ] 提交最终 checkpoint 到 course.pku.edu.cn
+- [✅️] 跑通基线 50 条干净数据 → 训练 → 评估流水线
+- [✅️] 修改数据生成加随机化，提升数据多样性
+- [✅️] 调优训练策略，目标成功率 ≥ 70%
+- [] 提交最终 checkpoint 到 course.pku.edu.cn
